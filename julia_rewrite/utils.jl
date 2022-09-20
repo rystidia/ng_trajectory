@@ -6,11 +6,11 @@ using Printf
 ######################
 
 function grid_compute(points)
-    minimum(minimum(u[2:length(u)] - u[1:length(u)-1] for u in [unique!(sort(c[:])) for c in eachcol(points)]))
+    minimum(minimum(diff(u) for u in [unique!(sort(c)) for c in eachcol(points)]))
 end
 
 function map_create(points::Array{Float64,2}, origin=nothing, size=nothing, grid=nothing)
-    global MAP, MAP_ORIGIN, MAP_GRID
+    global MAP, MAP_ORIGIN, MAP_GRID, TRACK_BITMAP
 
     println("Creating map...")
 
@@ -26,6 +26,10 @@ function map_create(points::Array{Float64,2}, origin=nothing, size=nothing, grid
     # Obtain size if not set
     _size = size !== nothing ? size : reshape(map(abs, maximum(points, dims=1) - minimum(points, dims=1)), (2, 1))
 
+    TRACK_BITMAP = TrackBitmap([minimum(points, dims = 1)...],
+                               [maximum(points, dims = 1)...],
+                               [_grid,_grid])
+
     println("\tMin:", reshape(minimum(points, dims=1), (2, 1)))
     println("\tMax:", reshape(maximum(points, dims=1), (2, 1)))
     println("\tDist:", reshape(maximum(points, dims=1), (2, 1)) - _origin)
@@ -38,7 +42,10 @@ function map_create(points::Array{Float64,2}, origin=nothing, size=nothing, grid
     for _p in eachrow(points)
         index = Int.(round.((_p[1:2] - _origin) ./ _grid) .+ 1)
         _m[index[1], index[2]] = 100
+        TRACK_BITMAP[_p] = true;
     end
+
+    @gp :map Gnuplot.palette(:gray1) "set size ratio -1" TRACK_BITMAP.bitmap' "w image notitle"
 
     MAP = _m
     MAP_ORIGIN = _origin

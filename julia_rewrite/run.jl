@@ -43,7 +43,7 @@ function cascade_run(; track, fileformat, notification, loop_i, loop_output, con
     optimizer_init(points=track, group_centers=rcandidate, group_centerline=result, logfile=LOGFILE; _alg...)
 
     # run GA
-    _fitness, _rcandidate, _tcandidate, _result = optimize()
+    _fitness, _rcandidate, _result = optimize()
 
     # TODO: plot
 
@@ -51,7 +51,7 @@ function cascade_run(; track, fileformat, notification, loop_i, loop_output, con
 
     # Store only better solution for next steps of the cascade
     if _fitness < fitness
-        return (_fitness, _rcandidate, _tcandidate, _result)
+        return (_fitness, _rcandidate, _result)
     else
         return loop_output
     end
@@ -137,8 +137,8 @@ end
 
 function execute(START_POINTS=nothing, VALID_POINTS=nothing)
 
-    CONFIGURATION = JSON.parsefile("configuration/matryoshka_ex_torino.json")
-    # CONFIGURATION = JSON.parsefile(ARGS[1])
+    CONFIGURATION = JSON.parsefile(length(ARGS) >= 1 ? ARGS[1] : "configuration/matryoshka_ex_torino.json")
+
     CONFIGURATION = symbol_dict(CONFIGURATION)
 
     # Load data about the track
@@ -225,7 +225,7 @@ function execute(START_POINTS=nothing, VALID_POINTS=nothing)
     end
 
     scatter(VALID_POINTS[:, 1], VALID_POINTS[:, 2], markershape=:+, markersize=1)
-    plot!(solution[4][:, 1], solution[4][:, 2])
+    plot!(solution[3][:, 1], solution[3][:, 2])
     savefig("myplot.png")
     @printf("Optimization finished.\n")
 

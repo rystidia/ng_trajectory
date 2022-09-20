@@ -1,7 +1,7 @@
 using Statistics
 using Dierckx
 using Printf
-# using Evolutionary
+using Evolutionary
 using Metaheuristics
 using Gnuplot
 using PyCall
@@ -34,6 +34,30 @@ FIGURE = nothing
 PLOT = nothing
 BUDGET = nothing
 NUM_WORKERS = Sys.CPU_THREADS
+
+mutable struct TrackBitmap
+    const p_min::Vector{Float64} # const here needs Julia 1.8
+    const p_max::Vector{Float64}
+    const p_step::Vector{Float64}
+    bitmap::BitArray{2}
+    TrackBitmap(p_min, p_max, p_step) = new(p_min, p_max, p_step,
+                                            falses((cld.(p_max .- p_min, p_step) .|> Int) + [1, 1] |> Tuple))
+end
+
+function index(tb::TrackBitmap, point)
+    idx = ((point .- tb.p_min) .÷ tb.p_step .|> Int) + [1, 1]
+end
+
+Base.setindex!(tb::TrackBitmap, x, pt) = tb.bitmap[index(tb, pt)...] = x
+function Base.getindex(tb::TrackBitmap, pt)
+    idx = index(tb, pt)
+    if any(idx .< (1,1)) || any(idx .> size(tb.bitmap))
+        return false
+    end
+    return tb.bitmap[idx...]
+end
+
+TRACK_BITMAP = nothing
 
 P = ParameterList()
 
@@ -137,22 +161,71 @@ function optimizer_init(; points,
     end
 end
 
-function optimize()
+using VideoIO
+import FileIO
+using FixedPointNumbers
+
+WRITER = nothing
+
+function plot_population(population, value; video=false)
+    n = length(MATRYOSHKA)
+    @gp tit="Best value: $(value)" "set size ratio -1" :-
+    @gp :- VALID_POINTS[:, 1] VALID_POINTS[:, 2] "w p pt 1 lc rgbcolor '0xeeeeee' notitle" :-
+    foreach(population) do p
+        points01 = reshape(p, (n, 2))
+        points = [matryoshka_map(MATRYOSHKA[i], [p])[1] for (i, p) in enumerate(eachrow(points01))]
+        _points = interpolate(mapreduce(permutedims, vcat, points))
+        @gp :- _points[:, 1] _points[:, 2] "w l notitle" :-
+    end
+    @gp :- ""
+    save(term="pngcairo size 1280, 720 fontscale 0.8", output="frame.png")
+    write(WRITER, FileIO.load("frame.png"))
+end
+
+function Evolutionary.trace!(record::Dict{String,Any}, objfun, state, population, method, options)
+    #plot_population(population, value(state), video=true)
+end
+
+function Evolutionary.after_while!(objfun, state, method, options)
+    global STATE = state # allow investigating the internal state
+                         # after the optimization ends
+end
+
+function optimize_evolutionary()
     global OPTIMIZER, MATRYOSHKA, LOGFILE, FILELOCK, VERBOSITY, INTERPOLATOR, INTERPOLATOR_ARGS, FIGURE, PLOT, PENALIZER, PENALIZER_ARGS
+    n = length(MATRYOSHKA)
+    constr = BoxConstraints(zeros(2n), ones(2n))
+    x0 = fill(0.5, 2n)
+    #method = Evolutionary.GA(populationSize=30, selection=uniformranking(10), mutation=gaussian(0.1), crossover=TPX)
+    #method = Evolutionary.CMAES(sigma0=0.1, c_1=0.01, c_mu=0.001, c_sigma=0.02)
+    method = Evolutionary.CMAES(sigma0=0.1)
+    res = Evolutionary.optimize(opt, constr, x0, method,
+                                Evolutionary.Options(iterations=1000,
+                                                     #parallelization=:thread,
+                                                     show_trace=true,
+                                                     store_trace=true,
+                                                     reltol=1e-6,
+                                                     ))
+    println(res)
+    global RESULT = res
+    trace = Evolutionary.trace(res)
+    @gp :trace value.(trace)[10:end] "w l" "set grid"
 
-    # Evolutionary
-    # constr = BoxConstraints(zeros(length(MATRYOSHKA) * 2), ones(length(MATRYOSHKA) * 2))
-    # x0 = [0.5 for _ in 1:length(MATRYOSHKA)*2]
-    # res = Evolutionary.optimize(_opt, constr, x0, GA(selection=uniformranking(3), mutation=uniform(0.1), crossover=DC), Evolutionary.Options(iterations=10))
-    # points01 = reshape(Evolutionary.minimizer(res), (length(MATRYOSHKA), 2))
+    points01 = reshape(Evolutionary.minimizer(res), (n, 2))
+end
 
-    # Metaheuristics
-    # x0 = [0.5 for _ in 1:length(MATRYOSHKA)*2]
-    # bounds = repeat([0.0, 1.0], 1, length(MATRYOSHKA) * 2)
-    # ga = Metaheuristics.GA(; crossover=Metaheuristics.OrderCrossover(), mutation=Metaheuristics.SlightMutation())
-    # points01 = Metaheuristics.optimize(_opt, bounds, ga)
+function optimize_metaheuristics()
+    global OPTIMIZER, MATRYOSHKA, LOGFILE, FILELOCK, VERBOSITY, INTERPOLATOR, INTERPOLATOR_ARGS, FIGURE, PLOT, PENALIZER, PENALIZER_ARGS
+    x0 = [0.5 for _ in 1:length(MATRYOSHKA)*2]
+    bounds = repeat([0.0, 1.0], 1, length(MATRYOSHKA) * 2)
+    ga = Metaheuristics.GA(;
+                           crossover=Metaheuristics.OrderCrossover(),
+                           mutation=Metaheuristics.SlightMutation())
+    points01 = Metaheuristics.optimize(_opt, bounds, ga)
+end
 
-    # Note: Evolutionary and Metaheuristics return Vector, so reshaping is required (5th row in _opt funciton)
+function optimize_nevergrad()
+    global OPTIMIZER, MATRYOSHKA, LOGFILE, FILELOCK, VERBOSITY, INTERPOLATOR, INTERPOLATOR_ARGS, FIGURE, PLOT, PENALIZER, PENALIZER_ARGS
 
     num_rows = length(MATRYOSHKA)
 
@@ -170,16 +243,31 @@ function optimize()
     # end
     recommendation = OPTIMIZER.minimize(_opt, batch_mode=false)
     points01 = convert(Array{Float64,2}, recommendation.args[1])
+end
 
+function optimize()
+    global OPTIMIZER, MATRYOSHKA, LOGFILE, FILELOCK, VERBOSITY, INTERPOLATOR, INTERPOLATOR_ARGS, FIGURE, PLOT, PENALIZER, PENALIZER_ARGS
+
+    encoder_options = (crf=23, preset="medium")
+
+    global WRITER
+    WRITER = open_video_out("video.mp4", RGB{N0f8}, (720, 1280),
+                            framerate=4, encoder_options=encoder_options)
+
+    points01 = optimize_evolutionary()
 
     points = [matryoshka_map(MATRYOSHKA[i], [p])[1] for (i, p) in enumerate(eachrow(points01))]
 
     PENALIZER_ARGS[:optimization] = false
-    final = _opt(recommendation.args[1])
+    final = _opt(points01)
+    plot_population([points01], final)
 
     # Interpolate received points
     # It is expected that they are unique and sorted.
     _points = interpolate(mapreduce(permutedims, vcat, points))
+
+
+    close_video_out!(WRITER)
 
     lock(FILELOCK) do
         if VERBOSITY > 0
@@ -188,37 +276,42 @@ function optimize()
         end
     end
 
-    return (final, points, recommendation.args[1], _points)
+    return (final, points, _points)
+end
+
+prepare_points(points::Array{Float64, 2}, matr_len) = convert(Array{Float64,2}, points) # Nevergrad
+prepare_points(points::Vector{Float64}, matr_len) = reshape(points, (matr_len, 2)) # Evolutionary
+
+function opt(points)
+    #@time _opt(points)
+    _opt(points)
 end
 
 function _opt(points)
     global VALID_POINTS, CRITERION_ARGS, INTERPOLATOR_ARGS, PENALIZER_ARGS
     global MATRYOSHKA, LOGFILE, FILELOCK, VERBOSITY, GRID, PENALTY
 
-    points = convert(Array{Float64,2}, points)
-    # points = reshape(points, (length(MATRYOSHKA), 2))
+    points = prepare_points(points, length(MATRYOSHKA))
 
     # Transform points
     points = [matryoshka_map(MATRYOSHKA[i], [p])[1] for (i, p) in enumerate(eachrow(points))]
     _points = interpolate(mapreduce(permutedims, vcat, points); INTERPOLATOR_ARGS...)
 
-    # @gp VALID_POINTS[:, 1] VALID_POINTS[:, 2] "w p pt 1 lc rgbcolor '0xeeeeee'" :-
-    # @gp :- _points[:, 1] _points[:, 2] "w l"
-
     # Check the correctness of the points and compute penalty
     penalty = penalize(_points, VALID_POINTS, GRID, PENALTY; PENALIZER_ARGS...)
 
     if penalty != 0
-        lock(FILELOCK) do
-            if VERBOSITY > 2
-                @printf(LOGFILE, "pointsA:%s\n", string(points))
-                @printf(LOGFILE, "pointsT:%s\n", string(_points))
+        if VERBOSITY > 0
+            lock(FILELOCK) do
+                if VERBOSITY > 2
+                    @printf(LOGFILE, "pointsA:%s\n", string(points))
+                    @printf(LOGFILE, "pointsT:%s\n", string(_points))
+                end
+                if VERBOSITY > 1
+                    @printf(LOGFILE, "penalty:%f\n", penalty)
+                end
+                flush(LOGFILE)
             end
-            if VERBOSITY > 1
-                @printf(LOGFILE, "penalty:%f\n", penalty)
-            end
-            flush(LOGFILE)
-
         end
         return Float64(penalty)
     end
